@@ -34,59 +34,77 @@ func _get_resource_type() -> String:
 	return "FontFile"
 
 
-func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]:
+func _get_import_options(_path: String, preset_index: int) -> Array[Dictionary]:
 	var arr: Array[Dictionary]
 	
-	arr.push_back(_p_option(
-		"use_alpha",
-		true,
-	))
-	
-	arr.push_back(_p_option(
-		"atlas_bounds",
-		Vector2i(16, 16),
-		PROPERTY_HINT_LINK,
-	))
-	
-	arr.push_back(_p_option(
-		"extra_advance",
-		Vector2.ZERO,
-	))
-	
-	arr.push_back(_p_option(
-		"extra_offset",
-		Vector2.ZERO,
-	))
-	
-	arr.push_back(_p_option(
-		"dump_pages",
-		false,
-	))
-	
-	
-	#arr.push_back(_p_option(
-		#"override_font_family",
-		#"",
-	#))
-	
-	#arr.push_back(_p_option(
-		#"override_weight",
-		#-1,
-		#PROPERTY_HINT_RANGE,
-		#"100,999,1,or_less,prefer_slider"
-	#))
-	
-	#arr.push_back(_p_option(
-		#"override_font_style",
-		#0b0,
-		#PROPERTY_HINT_FLAGS,
-		#"Bold:1,Italic:2,Fixed Width:4"
-	#))
+	match preset_index:
+		Preset.DEFAULT:
+			arr.push_back(_p_option(
+				"use_alpha",
+				true,
+			))
+			
+			arr.push_back(_p_option(
+				"scale_fractional",
+				false,
+			))
+			
+			arr.push_back(_p_option(
+				"atlas_bounds",
+				Vector2i(16, 16),
+				PROPERTY_HINT_LINK,
+			))
+			
+			arr.push_back(_p_option(
+				"extra_advance",
+				Vector2.ZERO,
+			))
+			
+			arr.push_back(_p_option(
+				"extra_offset",
+				Vector2.ZERO,
+			))
+			
+			arr.push_back(_p_option(
+				"underline_position",
+				0.0,
+			))
+			
+			arr.push_back(_p_option(
+				"underline_thickness",
+				0.0,
+			))
+			
+			arr.push_back(_p_option(
+				"dump_pages",
+				false,
+			))
+			
+			#arr.push_back(_p_option(
+				#"override_font_family",
+				#"",
+			#))
+			#arr.push_back(_p_option(
+				#"override_weight",
+				#-1,
+				#PROPERTY_HINT_RANGE,
+				#"100,999,1,or_less,prefer_slider"
+			#))
+			#arr.push_back(_p_option(
+				#"override_font_style",
+				#0b0,
+				#PROPERTY_HINT_FLAGS,
+				#"Bold:1,Italic:2,Fixed Width:4"
+			#))
 	
 	return arr
 
 
-func _p_option(name: String, default_value: Variant, property_hint := PROPERTY_HINT_NONE, hint_string := "") -> Dictionary:
+func _p_option(
+		name: String,
+		default_value: Variant,
+		property_hint := PROPERTY_HINT_NONE,
+		hint_string := "") -> Dictionary:
 	var dict: Dictionary = {
 		"name": name,
 		"default_value": default_value,
@@ -128,6 +146,8 @@ func _import(source_file: String, save_path: String, options: Dictionary, _platf
 	var bdf_font := BDFFont.new(
 			file,
 			glyphmap,
+			options.get("underline_position", 0.0),
+			options.get("underline_thickness", 0.0),
 			#options.get("override_font_family", ""),
 			#options.get("override_font_style", 0b0),
 			#options.get("override_weight", -1),
@@ -137,6 +157,7 @@ func _import(source_file: String, save_path: String, options: Dictionary, _platf
 			options.get("extra_advance", Vector2.ZERO),
 			options.get("extra_offset", Vector2.ZERO),
 			options.get("use_alpha", true),
+			options.get("scale_fractional", false),
 	)
 	
 	if options.get("dump_pages", false):
@@ -149,7 +170,6 @@ func _import(source_file: String, save_path: String, options: Dictionary, _platf
 			])
 			if font.get_texture_image(0, fixed_vector, page).save_png(filename) == OK:
 				gen_files.push_back(filename)
-	
 	
 	return ResourceSaver.save(font, ".".join([save_path, _get_save_extension()]))
 
@@ -184,22 +204,30 @@ func populate_glyphmap() -> void:
 
 class BDFFont extends RefCounted:
 	var fixed_size: int
-	var glyph_bounds: Vector2
-	var glyph_offset: Vector2
+	var max_glyph_bounds: Vector2
+	var default_glyph_offset: Vector2
 	var font_family: String
-	var font_style: int = 0b0
+	var font_style: int = TextServer.FONT_FIXED_WIDTH # is unset automatically
 	var font_weight: int = 400
 	
-	var advance: float
+	var advance: float = 0.0
 	var ascent: float
 	var descent: float
+	var underline_position: float
+	var underline_thickness: float
 	
 	#var advance: int
 	var glyphs: Array[Glyph]
 	var glyphmap: Dictionary[String, int]
 	
-	func _init(file: FileAccess, arg_glyphmap: Dictionary[String, int]) -> void:
+	func _init(
+			file: FileAccess,
+			arg_glyphmap: Dictionary[String, int],
+			underline_pos: float,
+			underline_thick: float) -> void:
 		glyphmap = arg_glyphmap
+		underline_position = underline_pos
+		underline_thickness = underline_thick
 		
 		while file.get_position() < file.get_length():
 			var line := file.get_line()
@@ -217,10 +245,10 @@ class BDFFont extends RefCounted:
 				# FONTBOUNDINGBOX 8 16 0 -4
 				"FONTBOUNDINGBOX":
 					var split := line.trim_prefix("FONTBOUNDINGBOX ").split_floats(" ")
-					glyph_bounds = Vector2(split[0], split[1])
-					glyph_offset = Vector2(split[2], split[3])
+					max_glyph_bounds = Vector2(split[0], split[1])
+					default_glyph_offset = Vector2(split[2], split[3])
 					
-					advance = glyph_bounds.x # default advance value
+					advance = max_glyph_bounds.x # default advance value
 				
 				# STARTPROPERTIES 20
 				"STARTPROPERTIES":
@@ -251,13 +279,13 @@ class BDFFont extends RefCounted:
 			
 			# WEIGHT_NAME "Medium"
 			"WEIGHT_NAME":
-				if prop.get_slice('"', 1) == "Bold":
+				if prop.get_slice('"', 1).to_lower() == "bold":
 					font_style |= TextServer.FONT_BOLD
 					font_weight = 700
 			
 			# SLANT "R"
 			"SLANT":
-				if prop.get_slice('"', 1) == "I":
+				if prop.get_slice('"', 1).to_lower() == "i":
 					font_style |= TextServer.FONT_ITALIC
 			
 			# FONT_ASCENT 12
@@ -269,8 +297,16 @@ class BDFFont extends RefCounted:
 				descent = prop.get_slice(" ", 1).to_float()
 			
 			# MIN_SPACE 8
-			"MIN_SPACE":
+			"MIN_SPACE", "NORM_SPACE":
 				advance = prop.get_slice(" ", 1).to_float()
+			
+			# UNDERLINE_POSITION -1 (TEST: does this move the outline up or down?)
+			"UNDERLINE_POSITION" when underline_position == 0.0:
+				underline_position = prop.get_slice(" ", 1).to_float()
+			
+			# UNDERLINE_THICKNESS 1
+			"UNDERLINE_THICKNESS" when underline_thickness == 0.0:
+				underline_thickness = prop.get_slice(" ", 1).to_float()
 	
 	
 	func parse_glyph(file: FileAccess, idx: int) -> void:
@@ -281,30 +317,34 @@ class BDFFont extends RefCounted:
 			atlas_bounds: Vector2i,
 			extra_advance: Vector2,
 			extra_offset: Vector2,
-			use_alpha: bool
-	) -> FontFile:
+			use_alpha: bool,
+			scale_fractional: bool) -> FontFile:
 		var font := FontFile.new()
 		
 		font.allow_system_fallback = false
 		font.fixed_size = fixed_size
-		font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_INTEGER_ONLY
-		#font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_ENABLED
+		font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_ENABLED if scale_fractional\
+				else TextServer.FIXED_SIZE_SCALE_INTEGER_ONLY
 		font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
 		font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
 		font.hinting = TextServer.HINTING_NONE
 		
 		font.set_cache_ascent(0, fixed_size, ascent)
 		font.set_cache_descent(0, fixed_size, descent)
+		if underline_position != 0.0:
+			font.set_cache_underline_position(0, fixed_size, -underline_position)
+		if underline_thickness != 0.0:
+			font.set_cache_underline_thickness(0, fixed_size, underline_thickness)
 		
 		var page_size := atlas_bounds.x * atlas_bounds.y
-		var bounds := Vector2i(glyph_bounds)
+		var fbounds := Vector2i(max_glyph_bounds)
 		var glyph_count := glyphs.size()
 		
 		for page in ceili(glyph_count / float(page_size)):
 			var data: PackedByteArray
 			
 			# one byte if no transparency is used
-			var bytes := atlas_bounds.x * bounds.x * atlas_bounds.y * bounds.y
+			var bytes := atlas_bounds.x * fbounds.x * atlas_bounds.y * fbounds.y
 			if use_alpha:
 				# two bytes if it is
 				bytes *= 2
@@ -316,6 +356,10 @@ class BDFFont extends RefCounted:
 				var glyph_row := floori(glyph_idx / float(atlas_bounds.x))
 				var glyph_column := glyph_idx % atlas_bounds.x
 				var fixed_vec := Vector2i(fixed_size, 0)
+				var bounds := glyph.bounds
+				
+				# unset monospace flag if needed
+				font_style &= ~(int(bounds.x != max_glyph_bounds.x) << 2)
 				
 				# (old debug code)
 				#if glyph_idx == 0x30:
@@ -333,14 +377,33 @@ class BDFFont extends RefCounted:
 					#print()
 				
 				font.set_glyph_advance(0, fixed_size, glyph.unicode, Vector2(advance, 0) + extra_advance)
-				# funky offset shenanigans, was done this way in the official godot monospace importer
-				font.set_glyph_offset(0, fixed_vec, glyph.unicode, Vector2(0, -0.5 * bounds.y) + glyph_offset + extra_offset)
-				font.set_glyph_size(0, fixed_vec, glyph.unicode, glyph_bounds)
+				# original offset code
+				#font.set_glyph_offset(0, fixed_vec, glyph.unicode,
+						#Vector2(0, -0.5 * bounds.y) + glyph.offset + extra_offset
+				#)
+				# mostly working v2
+				#font.set_glyph_offset(0, fixed_vec, glyph.unicode,
+						#Vector2(0, 0.5 * max_glyph_bounds.y - bounds.y)\
+						#- Vector2(0, glyph.offset.y - default_glyph_offset.y)\
+						#+ default_glyph_offset + extra_offset
+				#)
+			 	# this one took a while
+				# while I'm still not sure if I handle the offsets 100% correctly, but they
+				# can be really easily adjusted using the import settings
+				font.set_glyph_offset(0, fixed_vec, glyph.unicode,
+						Vector2(0, max_glyph_bounds.y - bounds.y - ascent)\
+						+ Vector2(
+								glyph.offset.x - default_glyph_offset.x,
+								default_glyph_offset.y - glyph.offset.y
+						)\
+						+ extra_offset
+				)
+				font.set_glyph_size(0, fixed_vec, glyph.unicode, bounds)
 				font.set_glyph_uv_rect(0, fixed_vec, glyph.unicode, Rect2(
-					glyph_column * bounds.x,
-					glyph_row * bounds.y,
-					glyph_bounds.x,
-					glyph_bounds.y
+					glyph_column * fbounds.x,
+					glyph_row * fbounds.y,
+					bounds.x,
+					bounds.y
 				))
 				font.set_glyph_texture_idx(0, fixed_vec, glyph.unicode, page)
 				
@@ -350,8 +413,8 @@ class BDFFont extends RefCounted:
 						var pixel := int(glyph.get_pixel(column, row)) * 0xff
 						
 						# index of the pixel in the byte array
-						var loc := ((glyph_row * bounds.y) + row) * atlas_bounds.x * bounds.x +\
-								glyph_column * bounds.x + column
+						var loc := ((glyph_row * fbounds.y) + row) * atlas_bounds.x * fbounds.x +\
+								glyph_column * fbounds.x + column
 						
 						if use_alpha:
 							loc *= 2
@@ -360,8 +423,8 @@ class BDFFont extends RefCounted:
 						data[loc] = pixel # luminance channel
 			
 			var image := Image.create_from_data(
-					atlas_bounds.x * bounds.x,
-					atlas_bounds.y * bounds.y,
+					atlas_bounds.x * fbounds.x,
+					atlas_bounds.y * fbounds.y,
 					false,
 					Image.FORMAT_LA8 if use_alpha else Image.FORMAT_L8,
 					data
@@ -371,7 +434,10 @@ class BDFFont extends RefCounted:
 			#print("image format: ", image.get_format())
 			
 			font.set_texture_image(0, Vector2i(fixed_size, 0), page, image)
-			
+		
+		font.font_name = font_family
+		font.font_style = font_style
+		font.font_weight = font_weight
 		return font
 
 
@@ -381,6 +447,7 @@ class Glyph extends RefCounted:
 	#var bitmap: BitMap
 	
 	var bounds: Vector2i
+	var offset: Vector2
 	var bitmap: PackedByteArray # access pixel information via helper methods
 	var _byte_count: int # number of bytes per row
 	
@@ -410,10 +477,14 @@ class Glyph extends RefCounted:
 				
 				# BBX 8 16 0 -4
 				_ when line.begins_with("BBX"):
-					bounds = Vector2i(
-						line.get_slice(" ", 1).to_int(),
-						line.get_slice(" ", 2).to_int()
-					)
+					var split := line.trim_prefix("BBX ").split_floats(" ")
+					bounds = Vector2i(int(split[0]), int(split[1]))
+					offset = Vector2(split[2], split[3])
+					
+					#bounds = Vector2i(
+						#line.get_slice(" ", 1).to_int(),
+						#line.get_slice(" ", 2).to_int()
+					#)
 					# bytes per row 
 					_byte_count = ceili(bounds.x / 8.0)
 					# bytes per row * row count
