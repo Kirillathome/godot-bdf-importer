@@ -1,13 +1,17 @@
 @tool
 extends EditorImportPlugin
 
+# enum for presets, even though there only is the one
+enum Preset {
+	DEFAULT,
+}
 
 # the glyphlist.txt used to populate the glyphmap
 const GLYPHLIST_PATH = "res://addons/bdf_importer/glyphlist.txt"
-const ATLAS_BOUNDS = Vector2i(16, 16)
 
-# postscript name to unicode
+# postscript name to unicode code map
 var glyphmap: Dictionary[String, int]
+
 
 #region plugin shenanigans
 func _get_importer_name() -> String:
@@ -15,7 +19,7 @@ func _get_importer_name() -> String:
 
 
 func _get_visible_name() -> String:
-	return "Bitmap BDF Font Importer"
+	return "BDF Font Importer"
 
 
 func _get_recognized_extensions() -> PackedStringArray:
@@ -31,38 +35,128 @@ func _get_resource_type() -> String:
 
 
 func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]:
-	return []
+	var arr: Array[Dictionary]
+	
+	arr.push_back(_p_option(
+		"use_alpha",
+		true,
+	))
+	
+	arr.push_back(_p_option(
+		"atlas_bounds",
+		Vector2i(16, 16),
+		PROPERTY_HINT_LINK,
+	))
+	
+	arr.push_back(_p_option(
+		"extra_advance",
+		Vector2.ZERO,
+	))
+	
+	arr.push_back(_p_option(
+		"extra_offset",
+		Vector2.ZERO,
+	))
+	
+	arr.push_back(_p_option(
+		"dump_pages",
+		false,
+	))
+	
+	
+	#arr.push_back(_p_option(
+		#"override_font_family",
+		#"",
+	#))
+	
+	#arr.push_back(_p_option(
+		#"override_weight",
+		#-1,
+		#PROPERTY_HINT_RANGE,
+		#"100,999,1,or_less,prefer_slider"
+	#))
+	
+	#arr.push_back(_p_option(
+		#"override_font_style",
+		#0b0,
+		#PROPERTY_HINT_FLAGS,
+		#"Bold:1,Italic:2,Fixed Width:4"
+	#))
+	
+	return arr
+
+
+func _p_option(name: String, default_value: Variant, property_hint := PROPERTY_HINT_NONE, hint_string := "") -> Dictionary:
+	var dict: Dictionary = {
+		"name": name,
+		"default_value": default_value,
+	}
+	
+	if property_hint != PROPERTY_HINT_NONE:
+		dict["property_hint"] = property_hint
+		if !hint_string.is_empty():
+			dict["hint_string"] = hint_string
+	
+	return dict
 
 
 func _get_preset_count() -> int:
-	return 0
+	return Preset.size()
 
 
-func _get_preset_name(_preset_index: int) -> String:
-	return "Default"
+func _get_preset_name(preset_index: int) -> String:
+	match preset_index:
+		Preset.DEFAULT:
+			return "Default"
+		_:
+			return "I dunno man"
 #endregion
 
 
-func _import(source_file: String, save_path: String, _options: Dictionary, _platform_variants: Array[String], _gen_files: Array[String]) -> Error:
+func _import(source_file: String, save_path: String, options: Dictionary, _platform_variants: Array[String], gen_files: Array[String]) -> Error:
+	var atlas_bounds: Vector2i = options.get("atlas_bounds", Vector2i(16, 16))
+	if atlas_bounds.x < 1 or atlas_bounds.y < 1:
+		push_error("Atlas size is zero or negative.")
+		return FAILED
+	
 	var file := FileAccess.open(source_file, FileAccess.READ)
 	if !file:
 		return FileAccess.get_open_error()
 	
 	populate_glyphmap()
 	
-	var bdf_font := BDFFont.new(file, glyphmap)
-	var font := bdf_font.assemble_fontfile()
-
-	#for page in font.get_texture_count(0, Vector2i(0, bdf_font.fixed_size)):
-		#var filename := ".".join(["res://dump/" + source_file.get_file().trim_suffix(".bdf"), page, "png"])
-		#font.get_texture_image(0, Vector2i(0, bdf_font.fixed_size), page).save_png(filename)
+	var bdf_font := BDFFont.new(
+			file,
+			glyphmap,
+			#options.get("override_font_family", ""),
+			#options.get("override_font_style", 0b0),
+			#options.get("override_weight", -1),
+	)
+	var font := bdf_font.assemble_fontfile(
+			atlas_bounds,
+			options.get("extra_advance", Vector2.ZERO),
+			options.get("extra_offset", Vector2.ZERO),
+			options.get("use_alpha", true),
+	)
+	
+	if options.get("dump_pages", false):
+		var fixed_vector := Vector2i(bdf_font.fixed_size, 0)
+		for page in font.get_texture_count(0, fixed_vector):
+			var filename := ".".join([
+					source_file.trim_suffix(".bdf"),
+					"page%d" % page,
+					"png",
+			])
+			if font.get_texture_image(0, fixed_vector, page).save_png(filename) == OK:
+				gen_files.push_back(filename)
+	
 	
 	return ResourceSaver.save(font, ".".join([save_path, _get_save_extension()]))
 
 
 func populate_glyphmap() -> void:
 	if !glyphmap.is_empty():
-		print("(not repopulating glyphmap)")
+		#print("(not repopulating glyphmap)")
 		return
 	
 	var file := FileAccess.open(GLYPHLIST_PATH, FileAccess.READ)
@@ -85,7 +179,7 @@ func populate_glyphmap() -> void:
 			
 		glyphmap[split[0]] = split[1].hex_to_int()
 	
-	print("Sucessfully populated the glyphmap.")
+	#print("Sucessfully populated the glyphmap.")
 
 
 class BDFFont extends RefCounted:
@@ -93,12 +187,13 @@ class BDFFont extends RefCounted:
 	var glyph_bounds: Vector2
 	var glyph_offset: Vector2
 	var font_family: String
-	# BITMAP glyph distribution format
-	# but actually, interestingly enough, glyphs are allowed to define their own bounding boxes
-	# however, for the sake of simplicity and because of the lack of relevance (glyphs use the
-	# same bounds as the font in terminus) I will assume that every glyhp is the same size.
-	var font_style: int = TextServer.FONT_FIXED_WIDTH
+	var font_style: int = 0b0
 	var font_weight: int = 400
+	
+	var advance: float
+	var ascent: float
+	var descent: float
+	
 	#var advance: int
 	var glyphs: Array[Glyph]
 	var glyphmap: Dictionary[String, int]
@@ -114,12 +209,18 @@ class BDFFont extends RefCounted:
 				# SIZE 16 72 72 (I do not need the resolution)
 				"SIZE":
 					fixed_size = line.get_slice(" ", 1).to_int()
+					
+					# default ascent/descent values
+					ascent = fixed_size * 0.5
+					descent = ascent
 				
 				# FONTBOUNDINGBOX 8 16 0 -4
 				"FONTBOUNDINGBOX":
 					var split := line.trim_prefix("FONTBOUNDINGBOX ").split_floats(" ")
 					glyph_bounds = Vector2(split[0], split[1])
 					glyph_offset = Vector2(split[2], split[3])
+					
+					advance = glyph_bounds.x # default advance value
 				
 				# STARTPROPERTIES 20
 				"STARTPROPERTIES":
@@ -158,42 +259,65 @@ class BDFFont extends RefCounted:
 			"SLANT":
 				if prop.get_slice('"', 1) == "I":
 					font_style |= TextServer.FONT_ITALIC
+			
+			# FONT_ASCENT 12
+			"FONT_ASCENT":
+				ascent = prop.get_slice(" ", 1).to_float()
+			
+			# FONT_DESCENT 4
+			"FONT_DESCENT":
+				descent = prop.get_slice(" ", 1).to_float()
+			
+			# MIN_SPACE 8
+			"MIN_SPACE":
+				advance = prop.get_slice(" ", 1).to_float()
 	
 	
 	func parse_glyph(file: FileAccess, idx: int) -> void:
 		glyphs[idx] = Glyph.new(file, glyphmap)
 	
 	
-	func assemble_fontfile() -> FontFile:
+	func assemble_fontfile(
+			atlas_bounds: Vector2i,
+			extra_advance: Vector2,
+			extra_offset: Vector2,
+			use_alpha: bool
+	) -> FontFile:
 		var font := FontFile.new()
 		
 		font.allow_system_fallback = false
 		font.fixed_size = fixed_size
-		#font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_INTEGER_ONLY
-		font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_ENABLED
+		font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_INTEGER_ONLY
+		#font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_ENABLED
 		font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
 		font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
 		font.hinting = TextServer.HINTING_NONE
 		
-		font.set_cache_ascent(0, fixed_size, 12)
-		font.set_cache_descent(0, fixed_size, 4)
+		font.set_cache_ascent(0, fixed_size, ascent)
+		font.set_cache_descent(0, fixed_size, descent)
 		
-		var page_size := ATLAS_BOUNDS.x * ATLAS_BOUNDS.y
+		var page_size := atlas_bounds.x * atlas_bounds.y
 		var bounds := Vector2i(glyph_bounds)
 		var glyph_count := glyphs.size()
 		
 		for page in ceili(glyph_count / float(page_size)):
 			var data: PackedByteArray
-			# one byte per pixel
-			data.resize(ATLAS_BOUNDS.x * bounds.x * ATLAS_BOUNDS.y * bounds.y)
+			
+			# one byte if no transparency is used
+			var bytes := atlas_bounds.x * bounds.x * atlas_bounds.y * bounds.y
+			if use_alpha:
+				# two bytes if it is
+				bytes *= 2
+			data.resize(bytes)
 			
 			# either a full page or however many glyphs remain
 			for glyph_idx in mini(page_size, glyph_count - page * page_size):
 				var glyph := glyphs[page * page_size + glyph_idx]
-				var glyph_row := floori(glyph_idx / float(ATLAS_BOUNDS.x))
-				var glyph_column := glyph_idx % ATLAS_BOUNDS.x
+				var glyph_row := floori(glyph_idx / float(atlas_bounds.x))
+				var glyph_column := glyph_idx % atlas_bounds.x
 				var fixed_vec := Vector2i(fixed_size, 0)
 				
+				# (old debug code)
 				#if glyph_idx == 0x30:
 					#print(char(glyph.unicode))
 					#print("BITMAP VERSION")
@@ -208,13 +332,9 @@ class BDFFont extends RefCounted:
 						#print(s)
 					#print()
 				
-				#if page == 0:
-					#print("glyph: ", char(glyph.unicode))
-					#print("row, column: (%s, %s)" % [glyph_row, glyph_column])
-				
-				font.set_glyph_advance(0, fixed_size, glyph.unicode, Vector2(bounds.x, 0))
-				font.set_glyph_offset(0, fixed_vec, glyph.unicode, glyph_offset)
-				#font.set_glyph_offset(0, fixed_vec, glyph.unicode, Vector2(0, -0.5 * bounds.y))
+				font.set_glyph_advance(0, fixed_size, glyph.unicode, Vector2(advance, 0) + extra_advance)
+				# funky offset shenanigans, was done this way in the official godot monospace importer
+				font.set_glyph_offset(0, fixed_vec, glyph.unicode, Vector2(0, -0.5 * bounds.y) + glyph_offset + extra_offset)
 				font.set_glyph_size(0, fixed_vec, glyph.unicode, glyph_bounds)
 				font.set_glyph_uv_rect(0, fixed_vec, glyph.unicode, Rect2(
 					glyph_column * bounds.x,
@@ -225,22 +345,25 @@ class BDFFont extends RefCounted:
 				font.set_glyph_texture_idx(0, fixed_vec, glyph.unicode, page)
 				
 				for row in bounds.y:
-					#if page == 0 and glyph_idx == 16:
-						#print("row ", row)
 					for column in bounds.x:
-						#if page == 0 and glyph_idx == 16:
-							#print("column ", column)
-							#print("COMBINED LOCATION: ", ((glyph_row * bounds.y) + row) * (ATLAS_BOUNDS.x * bounds.x) + glyph_column * bounds.x + column)
-						data[
-								((glyph_row * bounds.y) + row) * ATLAS_BOUNDS.x * bounds.x +
+						# pixel byte value
+						var pixel := int(glyph.get_pixel(column, row)) * 0xff
+						
+						# index of the pixel in the byte array
+						var loc := ((glyph_row * bounds.y) + row) * atlas_bounds.x * bounds.x +\
 								glyph_column * bounds.x + column
-						] = int(glyph.get_pixel(column, row)) * 0xff
+						
+						if use_alpha:
+							loc *= 2
+							data[loc+1] = pixel # alpha channel
+						
+						data[loc] = pixel # luminance channel
 			
 			var image := Image.create_from_data(
-					ATLAS_BOUNDS.x * bounds.x,
-					ATLAS_BOUNDS.y * bounds.y,
+					atlas_bounds.x * bounds.x,
+					atlas_bounds.y * bounds.y,
 					false,
-					Image.FORMAT_L8,
+					Image.FORMAT_LA8 if use_alpha else Image.FORMAT_L8,
 					data
 			)
 			
