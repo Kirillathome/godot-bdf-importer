@@ -221,7 +221,7 @@ class BDFFont extends RefCounted:
 	var font_style: int = TextServer.FONT_FIXED_WIDTH # is unset automatically if it isn't
 	var font_weight: int = 400 # ...is this used for bitmap fonts?
 	
-	var advance: float = 0.0 # either set in properties or glyph BBX is used as fallback
+	var advance: Vector2 # either set in properties or glyph BBX is used as fallback
 	var ascent: float
 	var descent: float
 	var underline_position: float
@@ -259,6 +259,11 @@ class BDFFont extends RefCounted:
 					default_glyph_offset = Vector2(split[2], split[3])
 					
 					#advance = max_glyph_bounds.x # default advance value
+				
+				# I'll just trust the document on this
+				"DWIDTH", "DWIDTH1":
+					var split := line.trim_prefix("DWIDTH ").trim_prefix("DWIDTH1 ").split_floats(" ")
+					advance = Vector2(split[0], split[1])
 				
 				# STARTPROPERTIES 20
 				"STARTPROPERTIES":
@@ -305,10 +310,6 @@ class BDFFont extends RefCounted:
 			# FONT_DESCENT 4
 			"FONT_DESCENT":
 				descent = prop.get_slice(" ", 1).to_float()
-			
-			# MIN_SPACE 8
-			"MIN_SPACE", "NORM_SPACE":
-				advance = prop.get_slice(" ", 1).to_float()
 			
 			# UNDERLINE_POSITION -1 (TEST: does this move the outline up or down?)
 			"UNDERLINE_POSITION" when underline_position == 0.0:
@@ -372,10 +373,15 @@ class BDFFont extends RefCounted:
 				var glyph_column := glyph_idx % atlas_bounds.x
 				var fixed_vec := Vector2i(fixed_size, 0) # yes, this is the correct way around (for whatever reason)
 				var bounds := glyph.bounds
-				# either the specified advance OR the glyph bounds + local offset as a fallback
-				# also ensure that it is not negative because godot does not like that
-				var adv := (Vector2(advance if advance != 0.0 else float(bounds.x + glyph.offset.x), 0.0)
-						+ extra_advance).maxf(0.0)
+				var adv := extra_advance
+				
+				if glyph.advance: # if DWIDTH if specified
+					adv += glyph.advance
+				elif advance: # use the font level DWIDTH if specified
+					adv += advance
+				else: # everything is bad
+					adv += Vector2(bounds.x + glyph.offset.x, 0.0)
+				adv = adv.maxf(0.0) # advance may not be negative
 				
 				# unset monospace flag if needed
 				font_style &= ~(int(bounds.x != max_glyph_bounds.x) << 2)
@@ -439,6 +445,7 @@ class Glyph extends RefCounted:
 	var unicode: int
 	var bounds: Vector2i
 	var offset: Vector2
+	var advance: Vector2
 	var bitmap: PackedByteArray # bitmap flattened into a one-dimensional byte array
 	
 	var _byte_count: int # number of bytes per row
@@ -486,6 +493,11 @@ class Glyph extends RefCounted:
 					_byte_count = ceili(bounds.x / 8.0)
 					# bytes per row * row count
 					bitmap.resize(_byte_count * bounds.y)
+				
+				# DWIDTH 8 0
+				_ when line.begins_with("DWIDTH"):
+					var split := line.trim_prefix("DWIDTH ").trim_prefix("DWIDTH1 ").split_floats(" ")
+					advance = Vector2(split[0], split[1])
 	
 	
 	func _return_from_error(file: FileAccess, chr: String) -> void:
