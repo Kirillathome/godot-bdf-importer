@@ -27,7 +27,7 @@ func _get_recognized_extensions() -> PackedStringArray:
 
 
 func _get_save_extension() -> String:
-	return "fontdata"
+	return "fontdata" # pretty sure that's the godot extension for fonts
 
 
 func _get_resource_type() -> String:
@@ -100,6 +100,7 @@ func _get_import_options(_path: String, preset_index: int) -> Array[Dictionary]:
 	return arr
 
 
+# small helper method
 func _p_option(
 		name: String,
 		default_value: Variant,
@@ -139,10 +140,14 @@ func _import(source_file: String, save_path: String, options: Dictionary, _platf
 	
 	var file := FileAccess.open(source_file, FileAccess.READ)
 	if !file:
-		return FileAccess.get_open_error()
+		return FileAccess.get_open_error() # couldn't open file
 	
-	populate_glyphmap()
+	# read glyphlist.txt and fill the map from it (if needed)
+	var err := populate_glyphmap()
+	if err:
+		return err
 	
+	# parse the .bdf
 	var bdf_font := BDFFont.new(
 			file,
 			glyphmap,
@@ -152,6 +157,7 @@ func _import(source_file: String, save_path: String, options: Dictionary, _platf
 			#options.get("override_font_style", 0b0),
 			#options.get("override_weight", -1),
 	)
+	# create a godot fontfile from it
 	var font := bdf_font.assemble_fontfile(
 			atlas_bounds,
 			options.get("extra_advance", Vector2.ZERO),
@@ -160,6 +166,7 @@ func _import(source_file: String, save_path: String, options: Dictionary, _platf
 			options.get("scale_fractional", false),
 	)
 	
+	# dump pages if needed
 	if options.get("dump_pages", false):
 		var fixed_vector := Vector2i(bdf_font.fixed_size, 0)
 		for page in font.get_texture_count(0, fixed_vector):
@@ -169,19 +176,22 @@ func _import(source_file: String, save_path: String, options: Dictionary, _platf
 					"png",
 			])
 			if font.get_texture_image(0, fixed_vector, page).save_png(filename) == OK:
+				# not sure if this is needed, but adds the pages to the gen_files array
+				# feel free to comment out these lines if they break something
 				gen_files.push_back(filename)
 	
+	# finally save the fontfile
 	return ResourceSaver.save(font, ".".join([save_path, _get_save_extension()]))
 
 
-func populate_glyphmap() -> void:
+func populate_glyphmap() -> Error:
 	if !glyphmap.is_empty():
-		#print("(not repopulating glyphmap)")
-		return
+		return OK # no need to repopulate
 	
 	var file := FileAccess.open(GLYPHLIST_PATH, FileAccess.READ)
 	if !file:
-		return
+		push_error("Failed to read glyphlist.txt!")
+		return FileAccess.get_open_error() # couldn't open file
 	
 	while file.get_position() < file.get_length():
 		var line := file.get_line()
@@ -199,24 +209,24 @@ func populate_glyphmap() -> void:
 			
 		glyphmap[split[0]] = split[1].hex_to_int()
 	
-	#print("Sucessfully populated the glyphmap.")
+	return OK # done
 
 
+#region helper subclasses
 class BDFFont extends RefCounted:
 	var fixed_size: int
 	var max_glyph_bounds: Vector2
 	var default_glyph_offset: Vector2
 	var font_family: String
-	var font_style: int = TextServer.FONT_FIXED_WIDTH # is unset automatically
-	var font_weight: int = 400
+	var font_style: int = TextServer.FONT_FIXED_WIDTH # is unset automatically if it isn't
+	var font_weight: int = 400 # ...is this used for bitmap fonts?
 	
-	var advance: float = 0.0
+	var advance: float = 0.0 # either set in properties or glyph BBX is used as fallback
 	var ascent: float
 	var descent: float
 	var underline_position: float
 	var underline_thickness: float
 	
-	#var advance: int
 	var glyphs: Array[Glyph]
 	var glyphmap: Dictionary[String, int]
 	
@@ -248,7 +258,7 @@ class BDFFont extends RefCounted:
 					max_glyph_bounds = Vector2(split[0], split[1])
 					default_glyph_offset = Vector2(split[2], split[3])
 					
-					advance = max_glyph_bounds.x # default advance value
+					#advance = max_glyph_bounds.x # default advance value
 				
 				# STARTPROPERTIES 20
 				"STARTPROPERTIES":
@@ -319,8 +329,10 @@ class BDFFont extends RefCounted:
 			extra_offset: Vector2,
 			use_alpha: bool,
 			scale_fractional: bool) -> FontFile:
+		# create godot fontfile
 		var font := FontFile.new()
 		
+		# set font settings to be similar to the ones used in the official importer
 		font.allow_system_fallback = false
 		font.fixed_size = fixed_size
 		font.fixed_size_scale_mode = TextServer.FIXED_SIZE_SCALE_ENABLED if scale_fractional\
@@ -328,7 +340,6 @@ class BDFFont extends RefCounted:
 		font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
 		font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
 		font.hinting = TextServer.HINTING_NONE
-		
 		font.set_cache_ascent(0, fixed_size, ascent)
 		font.set_cache_descent(0, fixed_size, descent)
 		if underline_position != 0.0:
@@ -341,7 +352,7 @@ class BDFFont extends RefCounted:
 		var glyph_count := glyphs.size()
 		
 		for page in ceili(glyph_count / float(page_size)):
-			var data: PackedByteArray
+			var data: PackedByteArray # image data
 			
 			# one byte if no transparency is used
 			var bytes := atlas_bounds.x * fbounds.x * atlas_bounds.y * fbounds.y
@@ -353,43 +364,27 @@ class BDFFont extends RefCounted:
 			# either a full page or however many glyphs remain
 			for glyph_idx in mini(page_size, glyph_count - page * page_size):
 				var glyph := glyphs[page * page_size + glyph_idx]
+				if !glyph.is_valid(max_glyph_bounds):
+					push_warning("Skipping invalid glyph. (page %d, idx %d)" % [page, glyph_idx])
+					continue # skip glyph if it isn't valid
+				
 				var glyph_row := floori(glyph_idx / float(atlas_bounds.x))
 				var glyph_column := glyph_idx % atlas_bounds.x
-				var fixed_vec := Vector2i(fixed_size, 0)
+				var fixed_vec := Vector2i(fixed_size, 0) # yes, this is the correct way around (for whatever reason)
 				var bounds := glyph.bounds
+				# either the specified advance OR the glyph bounds + local offset as a fallback
+				# also ensure that it is not negative because godot does not like that
+				var adv := (Vector2(advance if advance != 0.0 else float(bounds.x + glyph.offset.x), 0.0)
+						+ extra_advance).maxf(0.0)
 				
 				# unset monospace flag if needed
 				font_style &= ~(int(bounds.x != max_glyph_bounds.x) << 2)
 				
-				# (old debug code)
-				#if glyph_idx == 0x30:
-					#print(char(glyph.unicode))
-					#print("BITMAP VERSION")
-					#for b in glyph.bitmap:
-						#print(String.num_int64(b, 2).pad_zeros(8))
-					#print()
-					#print("LOGIC VERSION")
-					#for row in 16:
-						#var s := ""
-						#for column in 8:
-							#s += "1" if glyph.get_pixel(column, row) else "0"
-						#print(s)
-					#print()
-				
-				font.set_glyph_advance(0, fixed_size, glyph.unicode, Vector2(advance, 0) + extra_advance)
-				# original offset code
-				#font.set_glyph_offset(0, fixed_vec, glyph.unicode,
-						#Vector2(0, -0.5 * bounds.y) + glyph.offset + extra_offset
-				#)
-				# mostly working v2
-				#font.set_glyph_offset(0, fixed_vec, glyph.unicode,
-						#Vector2(0, 0.5 * max_glyph_bounds.y - bounds.y)\
-						#- Vector2(0, glyph.offset.y - default_glyph_offset.y)\
-						#+ default_glyph_offset + extra_offset
-				#)
+				font.set_glyph_advance(0, fixed_size, glyph.unicode, adv)
 			 	# this one took a while
-				# while I'm still not sure if I handle the offsets 100% correctly, but they
-				# can be really easily adjusted using the import settings
+				# while I'm still not sure if I handle the offsets 100% correctly, they can quite
+				# easily be adjusted using the import settings, meaning that this shouldn't be
+				# fatal if I got it wrong
 				font.set_glyph_offset(0, fixed_vec, glyph.unicode,
 						Vector2(0, max_glyph_bounds.y - bounds.y - ascent)\
 						+ Vector2(
@@ -422,6 +417,7 @@ class BDFFont extends RefCounted:
 						
 						data[loc] = pixel # luminance channel
 			
+			# finally create the image
 			var image := Image.create_from_data(
 					atlas_bounds.x * fbounds.x,
 					atlas_bounds.y * fbounds.y,
@@ -430,11 +426,9 @@ class BDFFont extends RefCounted:
 					data
 			)
 			
-			#image.convert(Image.FORMAT_RGBAF)
-			#print("image format: ", image.get_format())
-			
 			font.set_texture_image(0, Vector2i(fixed_size, 0), page, image)
 		
+		# set some remaining font flags
 		font.font_name = font_family
 		font.font_style = font_style
 		font.font_weight = font_weight
@@ -443,27 +437,34 @@ class BDFFont extends RefCounted:
 
 class Glyph extends RefCounted:
 	var unicode: int
-	#var index: int # used for the atlas generation
-	#var bitmap: BitMap
-	
 	var bounds: Vector2i
 	var offset: Vector2
-	var bitmap: PackedByteArray # access pixel information via helper methods
+	var bitmap: PackedByteArray # bitmap flattened into a one-dimensional byte array
+	
 	var _byte_count: int # number of bytes per row
+	var _valid := true
 	
 	func _init(file: FileAccess, glyphmap: Dictionary[String, int]) -> void:
-		#index = idx
-		
 		# STARTCHAR a
 		var chr := file.get_line().trim_prefix("STARTCHAR ")
-		if chr == "char0":
-			unicode = 0x0 # TEST: does godot accept this?
+		if chr == "char0": # hardcoded null character
+			unicode = 0x0
 		elif glyphmap.has(chr):
 			unicode = glyphmap[chr]
 		elif chr.begins_with("uni"):
 			unicode = chr.trim_prefix("uni").hex_to_int()
+			if !unicode:
+				_return_from_error(file, chr)
+				return
+		elif chr.begins_with("char"):
+			# I assume that this is the correct way to interpret the char prefix
+			unicode = chr.trim_prefix("char").to_int()
+			if !unicode:
+				_return_from_error(file, chr)
+				return
 		else:
-			unicode = 0xfffd
+			_return_from_error(file, chr)
+			return
 		
 		while file.get_position() < file.get_length():
 			var line := file.get_line()
@@ -473,7 +474,7 @@ class Glyph extends RefCounted:
 					parse_bitmap(file)
 				
 				"ENDCHAR":
-					break
+					break # done
 				
 				# BBX 8 16 0 -4
 				_ when line.begins_with("BBX"):
@@ -481,14 +482,20 @@ class Glyph extends RefCounted:
 					bounds = Vector2i(int(split[0]), int(split[1]))
 					offset = Vector2(split[2], split[3])
 					
-					#bounds = Vector2i(
-						#line.get_slice(" ", 1).to_int(),
-						#line.get_slice(" ", 2).to_int()
-					#)
 					# bytes per row 
 					_byte_count = ceili(bounds.x / 8.0)
 					# bytes per row * row count
 					bitmap.resize(_byte_count * bounds.y)
+	
+	
+	func _return_from_error(file: FileAccess, chr: String) -> void:
+		push_error("Failed to parse glyph '", chr, "', skipping...")
+		_valid = false
+		
+		while file.get_position() < file.get_length():
+			var line := file.get_line()
+			if line == "ENDCHAR":
+				break
 	
 	
 	func parse_bitmap(file: FileAccess) -> void:
@@ -502,7 +509,12 @@ class Glyph extends RefCounted:
 	func get_pixel(x: int, y: int) -> bool:
 		var column := floori(x / 8.0)
 		var byte := bitmap[y * _byte_count + column]
-		#var byte := bitmap[y * _byte_count]
 		
+		# read bits from left to right
 		return byte & (0b1 << (7 - (x % 8)))
-		#return byte & 1 << (x % 8)
+	
+	
+	func is_valid(max_bounds: Vector2) -> bool:
+		# check if glyph is valid and fits into the FONTBOUNDINGBOX
+		return _valid and bounds.x <= max_bounds.x and bounds.y <= max_bounds.y
+#endregion
