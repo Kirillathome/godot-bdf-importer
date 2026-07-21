@@ -7,7 +7,7 @@ enum Preset {
 }
 
 # the glyphlist.txt used to populate the glyphmap
-const GLYPHLIST_PATH = "res://addons/bdf_importer/glyphlist.txt"
+const GLYPHLIST_PATH = "res://addons/godot-bdf-importer/glyphlist.txt"
 
 # postscript name to unicode code map
 var glyphmap: Dictionary[String, int]

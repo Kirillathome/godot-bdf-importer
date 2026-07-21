@@ -7,7 +7,7 @@ var bitmap_importer: EditorImportPlugin
 func _enter_tree() -> void:
 	# Initialization of the plugin goes here.
 	# casting to GDScript seems slightly cursed in concept, works great though
-	bitmap_importer = (preload("res://addons/bdf_importer/bitmap_bdf_importer.gd") as GDScript).new()
+	bitmap_importer = (preload("res://addons/godot-bdf-importer/bitmap_bdf_importer.gd") as GDScript).new()
 	add_import_plugin(bitmap_importer)
 
 
